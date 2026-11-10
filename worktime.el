@@ -4,7 +4,7 @@
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 
 ;; Author: Florian Marrero Liestmann <f.m.liestmann@fx-ttr.de>
-;; Version: 0.4
+;; Version: 0.4.0
 ;; Package-Requires: ((emacs "29.1"))
 ;; Keywords: calendar, tools
 ;; URL: https://github.com/fmarl/worktime.el
