@@ -64,6 +64,16 @@ The current time is 2026-11-11 12:00 unless BODY changes it."
          (worktime-mode -1)
          (delete-file worktime-file)))))
 
+(defmacro worktime-test--should-fail (message form)
+  "Assert that FORM signals a `user-error' with MESSAGE."
+  `(should (equal (cadr (should-error ,form :type 'user-error)) ,message)))
+
+(defun worktime-test--answering (answers command)
+  "Call COMMAND interactively, answering its prompts with ANSWERS."
+  (cl-letf (((symbol-function 'read-string)
+             (lambda (&rest _) (pop answers))))
+    (call-interactively command)))
+
 (defun worktime-test--worked (day now)
   (worktime-test--with-defaults
     (worktime--worked-minutes day (worktime-test--time now))))
@@ -128,6 +138,18 @@ The current time is 2026-11-11 12:00 unless BODY changes it."
                   (worktime--resolve-start 3 0 (worktime-test--time "23:00")))
                  "2026-11-10 03:00")))
 
+(ert-deftest worktime-test-resolve-start-allows-six-hours-ahead ()
+  (let ((now (worktime-test--time "10:00")))
+    (should (equal (worktime-test--fmt (worktime--resolve-start 16 0 now))
+                   "2026-11-09 16:00"))
+    (should (equal (worktime-test--fmt (worktime--resolve-start 16 1 now))
+                   "2026-11-08 16:01")))
+  (let ((now (worktime-test--time "22:00")))
+    (should (equal (worktime-test--fmt (worktime--resolve-start 4 0 now))
+                   "2026-11-10 04:00"))
+    (should (equal (worktime-test--fmt (worktime--resolve-start 4 1 now))
+                   "2026-11-09 04:01"))))
+
 (ert-deftest worktime-test-worked-without-breaks ()
   (let ((day (worktime-test--day "08:00")))
     (should (= (worktime-test--worked day "14:00") 360))
@@ -148,6 +170,14 @@ The current time is 2026-11-11 12:00 unless BODY changes it."
     (should (= (worktime-test--worked day "14:10") 360))
     (should (= (worktime-test--worked day "14:40") 360))
     (should (= (worktime-test--worked day "14:41") 361))))
+
+(ert-deftest worktime-test-break-credited-from-minimum-length ()
+  (should (equal (worktime-test--end
+                  (worktime-test--day "08:00" '("09:00" . "09:15")))
+                 "16:30"))
+  (should (equal (worktime-test--end
+                  (worktime-test--day "08:00" '("09:00" . "09:14")))
+                 "16:44")))
 
 (ert-deftest worktime-test-worked-with-open-break ()
   (let ((day (worktime-test--day "08:00" '("12:00"))))
@@ -211,6 +241,9 @@ The current time is 2026-11-11 12:00 unless BODY changes it."
                     (worktime-test--time "12:20"))
                    " P 00:20 -04:00 16:30"))
     (should (equal (worktime--mode-line-string
+                    (worktime-test--day "08:00") (worktime-test--time "16:30"))
+                   " +00:00 16:30"))
+    (should (equal (worktime--mode-line-string
                     (worktime-test--day "08:00") (worktime-test--time "17:00"))
                    " +00:30 16:30"))))
 
@@ -235,15 +268,26 @@ The current time is 2026-11-11 12:00 unless BODY changes it."
     (should-not (memq 'worktime-mode-line-string global-mode-string))
     (should-not worktime--timer)))
 
+(ert-deftest worktime-test-mode-line-follows-day ()
+  (worktime-test--with-file
+    (worktime-start (worktime-test--time "08:00" "2026-11-11"))
+    (should (memq 'worktime-mode-line-string global-mode-string))
+    (should (equal worktime-mode-line-string " -04:00 16:30"))
+    (worktime-stop (worktime-test--time "12:00" "2026-11-11"))
+    (should (equal worktime-mode-line-string ""))))
+
 (ert-deftest worktime-test-warns-about-excessive-workday ()
   (worktime-test--with-file
-    (let ((worktime-hours-per-week 44)
-          (worktime-days-per-week 4)
-          (warned nil))
+    (let ((warnings nil))
       (cl-letf (((symbol-function 'display-warning)
-                 (lambda (&rest _) (setq warned t))))
-        (worktime-mode 1))
-      (should warned))))
+                 (lambda (_type message &rest _) (push message warnings))))
+        (worktime-mode 1)
+        (should-not warnings)
+        (let ((worktime-hours-per-week 44)
+              (worktime-days-per-week 4))
+          (worktime-mode 1)))
+      (should (equal warnings
+                     '("Working day of 11:00 exceeds the maximum of 10:00"))))))
 
 ;;;; Tracking
 
@@ -287,8 +331,9 @@ The current time is 2026-11-11 12:00 unless BODY changes it."
 (ert-deftest worktime-test-start-rejects-open-day ()
   (worktime-test--with-file
     (worktime-start (worktime-test--time "08:00"))
-    (should-error (worktime-start (worktime-test--time "08:00" "2026-11-10"))
-                  :type 'user-error)))
+    (worktime-test--should-fail
+     "Working day from 2026-11-09 08:00 is still open"
+     (worktime-start (worktime-test--time "08:00" "2026-11-10")))))
 
 (ert-deftest worktime-test-start-stops-open-day ()
   (worktime-test--with-file
@@ -338,25 +383,43 @@ The current time is 2026-11-11 12:00 unless BODY changes it."
     (worktime-test--at (worktime-test--time "10:00")
       (worktime-add-break (worktime-test--time "09:32")
                           (worktime-test--time "09:56"))
-      (should-error (worktime-add-break (worktime-test--time "09:50")
-                                        (worktime-test--time "10:00"))
-                    :type 'user-error)
-      (should-error (worktime-add-break (worktime-test--time "07:00")
-                                        (worktime-test--time "07:30"))
-                    :type 'user-error)
-      (should-error (worktime-add-break (worktime-test--time "11:00")
-                                        (worktime-test--time "10:30"))
-                    :type 'user-error))
+      (worktime-test--should-fail
+       "Break overlaps the one from 09:32"
+       (worktime-add-break (worktime-test--time "09:50")
+                           (worktime-test--time "10:00")))
+      (worktime-test--should-fail
+       "Break starts before the working day"
+       (worktime-add-break (worktime-test--time "07:00")
+                           (worktime-test--time "07:30")))
+      (worktime-test--should-fail
+       "Break ends before it starts"
+       (worktime-add-break (worktime-test--time "09:58")
+                           (worktime-test--time "09:57")))
+      (worktime-test--should-fail
+       "Break ends before it starts"
+       (worktime-add-break (worktime-test--time "09:58")
+                           (worktime-test--time "09:58"))))
     (should (= (length (worktime-day-breaks worktime--day)) 1))))
+
+(ert-deftest worktime-test-add-break-rejects-overlap-with-running-break ()
+  (worktime-test--with-file
+    (worktime-start (worktime-test--time "08:00"))
+    (worktime-test--at (worktime-test--time "09:00") (worktime-pause))
+    (worktime-test--at (worktime-test--time "10:00")
+      (worktime-test--should-fail
+       "Break overlaps the one from 09:00"
+       (worktime-add-break (worktime-test--time "09:30")
+                           (worktime-test--time "09:45"))))))
 
 (ert-deftest worktime-test-pause-and-resume-errors ()
   (worktime-test--with-file
-    (should-error (worktime-pause) :type 'user-error)
+    (worktime-test--should-fail "No working day is open" (worktime-pause))
     (worktime-start (worktime-test--time "08:00"))
     (worktime-test--at (worktime-test--time "10:00")
-      (should-error (worktime-resume) :type 'user-error)
+      (worktime-test--should-fail "No break is running" (worktime-resume))
       (worktime-pause)
-      (should-error (worktime-pause) :type 'user-error))))
+      (worktime-test--should-fail "A break is already running"
+                                  (worktime-pause)))))
 
 (ert-deftest worktime-test-stop-rejects-end-before-break ()
   (worktime-test--with-file
@@ -364,18 +427,35 @@ The current time is 2026-11-11 12:00 unless BODY changes it."
     (worktime-test--at (worktime-test--time "12:30")
       (worktime-add-break (worktime-test--time "12:00")
                           (worktime-test--time "12:30")))
-    (should-error (worktime-stop (worktime-test--time "11:00"))
-                  :type 'user-error)))
+    (worktime-test--should-fail "Working day ends before its last break"
+                                (worktime-stop (worktime-test--time "11:00")))))
 
+(ert-deftest worktime-test-stop-rejects-end-before-start ()
+  (worktime-test--with-file
+    (worktime-start (worktime-test--time "08:00"))
+    (worktime-test--should-fail "Working day ends before it started"
+                                (worktime-stop (worktime-test--time "07:00")))
+    (should (worktime--open-day))))
+
+(ert-deftest worktime-test-stop-rejects-break-end-before-its-start ()
+  (worktime-test--with-file
+    (worktime-start (worktime-test--time "08:00"))
+    (worktime-test--at (worktime-test--time "12:00") (worktime-pause))
+    (worktime-test--should-fail "Break ends before it starts"
+                                (worktime-stop (worktime-test--time "17:00")
+                                               (worktime-test--time "11:00")))
+    (should (worktime--open-day))))
 
 (ert-deftest worktime-test-start-rejects-overlap ()
   (worktime-test--with-file
     (worktime-start (worktime-test--time "08:00"))
     (worktime-stop (worktime-test--time "16:30"))
-    (should-error (worktime-start (worktime-test--time "08:00"))
-                  :type 'user-error)
-    (should-error (worktime-start (worktime-test--time "16:00"))
-                  :type 'user-error)
+    (worktime-test--should-fail
+     "Previous day ended later, at 2026-11-09 16:30"
+     (worktime-start (worktime-test--time "08:00")))
+    (worktime-test--should-fail
+     "Previous day ended later, at 2026-11-09 16:30"
+     (worktime-start (worktime-test--time "16:00")))
     (let ((days (worktime--read-days)))
       (should (= (length days) 1))
       (should (worktime-day-end (car days))))))
@@ -383,9 +463,10 @@ The current time is 2026-11-11 12:00 unless BODY changes it."
 (ert-deftest worktime-test-start-keeps-open-day-on-overlap ()
   (worktime-test--with-file
     (worktime-start (worktime-test--time "08:00"))
-    (should-error (worktime-start (worktime-test--time "16:00")
-                                  (worktime-test--time "16:30"))
-                  :type 'user-error)
+    (worktime-test--should-fail
+     "Previous day ended later, at 2026-11-09 16:30"
+     (worktime-start (worktime-test--time "16:00")
+                     (worktime-test--time "16:30")))
     (should-not (worktime-day-end (car (worktime--read-days))))))
 
 (ert-deftest worktime-test-days-per-week-must-be-positive ()
@@ -404,7 +485,37 @@ The current time is 2026-11-11 12:00 unless BODY changes it."
       (should warned)
       (should worktime-mode)
       (should-not worktime--day))
-    (should-error (worktime-pause))))
+    (should-error (worktime-pause) :type 'end-of-file)))
+
+(ert-deftest worktime-test-first-start-creates-files ()
+  (worktime-test--with-file
+    (let* ((dir (make-temp-file "worktime-test-" t))
+           (worktime-file (expand-file-name "a/worktime.eld" dir))
+           (worktime-timedot-file (expand-file-name "b/worktime.timedot" dir)))
+      (unwind-protect
+          (progn
+            (should-not (worktime--read-days))
+            (worktime-start (worktime-test--time "08:00"))
+            (worktime-stop (worktime-test--time "16:30"))
+            (should (= (length (worktime--read-days)) 1))
+            (should (file-exists-p worktime-timedot-file)))
+        (delete-directory dir t)))))
+
+(ert-deftest worktime-test-interactive-start-and-add-break ()
+  (worktime-test--with-file
+    (worktime-test--at (worktime-test--time "10:00" "2026-11-11")
+      (worktime-test--answering '("8:15") #'worktime-start)
+      (worktime-test--answering '("9:32" "9:56") #'worktime-add-break))
+    (let ((day (worktime--open-day)))
+      (should (equal (worktime-test--fmt (worktime-day-start day))
+                     "2026-11-11 08:15"))
+      (should (equal (mapcar (lambda (break)
+                               (cons (worktime-test--fmt
+                                      (worktime-break-start break))
+                                     (worktime-test--fmt
+                                      (worktime-break-end break))))
+                             (worktime-day-breaks day))
+                     '(("2026-11-11 09:32" . "2026-11-11 09:56")))))))
 
 (defun worktime-test--stop-args (day now)
   "Call `worktime--read-stop-args', accepting every default.
@@ -442,38 +553,38 @@ Return the arguments and the prompts shown."
       (should (equal args '("2026-11-09 16:30" nil)))
       (should (= (length prompts) 1)))))
 
-
 (ert-deftest worktime-test-add-break-rejects-future ()
   (worktime-test--with-file
     (worktime-start (worktime-test--time "08:00"))
     (worktime-test--at (worktime-test--time "10:00")
-      (should-error (worktime-add-break (worktime-test--time "10:30")
-                                        (worktime-test--time "10:45"))
-                    :type 'user-error)
+      (worktime-test--should-fail
+       "Break ends in the future"
+       (worktime-add-break (worktime-test--time "10:30")
+                           (worktime-test--time "10:45")))
       (let ((start (worktime--time-after 7 30 (worktime-test--time "08:00"))))
-        (should-error (worktime-add-break start (time-add start (* 15 60)))
-                      :type 'user-error)))
+        (worktime-test--should-fail
+         "Break ends in the future"
+         (worktime-add-break start (time-add start (* 15 60))))))
     (should-not (worktime-day-breaks (worktime--open-day)))))
 
 (ert-deftest worktime-test-stop-rejects-future ()
   (worktime-test--with-file
     (worktime-start (worktime-test--time "08:00"))
     (worktime-test--at (worktime-test--time "16:30")
-      (should-error (worktime-stop (worktime--time-after
-                                    7 30 (worktime-test--time "08:00")))
-                    :type 'user-error))
+      (worktime-test--should-fail
+       "Working day ends in the future"
+       (worktime-stop (worktime--time-after
+                       7 30 (worktime-test--time "08:00")))))
     (should (worktime--open-day))))
 
 (ert-deftest worktime-test-start-rejects-future-previous-end ()
   (worktime-test--with-file
     (worktime-start (worktime-test--time "08:00"))
     (worktime-test--at (worktime-test--time "07:00" "2026-11-10")
-      (let ((err (should-error
-                  (worktime-start (worktime-test--time "09:00" "2026-11-10")
-                                  (worktime-test--time "08:00" "2026-11-10"))
-                  :type 'user-error)))
-        (should (equal (cadr err)
-                       "Working day ends in the future"))))
+      (worktime-test--should-fail
+       "Working day ends in the future"
+       (worktime-start (worktime-test--time "09:00" "2026-11-10")
+                       (worktime-test--time "08:00" "2026-11-10"))))
     (should (= (length (worktime--read-days)) 1))
     (should (worktime--open-day))))
 
@@ -508,15 +619,12 @@ Return the arguments and the prompts shown."
                                    "\n2026-11-10\nwork   431m\nbreak  30m\n"))))
         (delete-file worktime-timedot-file)))))
 
-(ert-deftest worktime-test-no-timedot-file-by-default ()
+(ert-deftest worktime-test-timedot-file-off-by-default ()
+  (should-not (eval (car (get 'worktime-timedot-file 'standard-value)) t))
   (worktime-test--with-file
-    (let ((default-directory (make-temp-file "worktime-test-" t)))
-      (unwind-protect
-          (progn
-            (worktime-start (worktime-test--time "08:00"))
-            (worktime-stop (worktime-test--time "16:30"))
-            (should-not (directory-files default-directory nil
-                                         directory-files-no-dot-files-regexp)))
-        (delete-directory default-directory t)))))
+    (let ((worktime-timedot-file nil))
+      (worktime-start (worktime-test--time "08:00"))
+      (worktime-stop (worktime-test--time "16:30"))
+      (should (worktime-day-end (car (worktime--read-days)))))))
 
 ;;; worktime-test.el ends here
