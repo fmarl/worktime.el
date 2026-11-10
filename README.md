@@ -49,6 +49,22 @@ your own function of the minutes worked. A fixed 30-minute break:
 (setq worktime-required-break-function (lambda (_minutes) 30))
 ```
 
+## hledger
+
+If `worktime-timedot-file` is set, `worktime-stop` writes all finished
+days there in hledger's timedot format, counting a night shift for the
+day it started:
+
+```
+2026-11-09
+work   510m
+break  30m
+```
+
+```sh
+hledger -f ~/worktime.timedot balance -M
+```
+
 ## Development
 
 ```sh

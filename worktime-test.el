@@ -52,6 +52,7 @@ The current time is 2026-11-11 12:00 unless BODY changes it."
   (declare (indent 0))
   `(worktime-test--with-defaults
      (let ((worktime-file (make-temp-file "worktime-test-" nil ".eld"))
+           (worktime-timedot-file nil)
            (worktime-start-functions nil)
            (worktime-stop-functions nil)
            (worktime--day nil)
@@ -485,5 +486,37 @@ Return the arguments and the prompts shown."
       (should (equal (worktime-test--fmt (worktime-day-end day))
                      "2026-11-10 06:30"))
       (should (= (worktime-day-break-minutes day) 30)))))
+
+(ert-deftest worktime-test-timedot-file ()
+  (worktime-test--with-file
+    (let ((worktime-timedot-file (make-temp-file "worktime-test-" nil
+                                                 ".timedot")))
+      (unwind-protect
+          (progn
+            (worktime-start (worktime-test--time "08:00"))
+            (worktime-test--at (worktime-test--time "12:00") (worktime-pause))
+            (worktime-test--at (worktime-test--time "12:45") (worktime-resume))
+            (worktime-stop (worktime-test--time "17:00"))
+            (worktime-start (worktime-test--time "08:00" "2026-11-10"))
+            (worktime-stop (worktime-test--time "15:41" "2026-11-10"))
+            (worktime-start (worktime-test--time "08:00" "2026-11-11"))
+            (should (equal (with-temp-buffer
+                             (insert-file-contents worktime-timedot-file)
+                             (buffer-substring (line-beginning-position 2)
+                                               (point-max)))
+                           (concat "\n2026-11-09\nwork   495m\nbreak  45m\n"
+                                   "\n2026-11-10\nwork   431m\nbreak  30m\n"))))
+        (delete-file worktime-timedot-file)))))
+
+(ert-deftest worktime-test-no-timedot-file-by-default ()
+  (worktime-test--with-file
+    (let ((default-directory (make-temp-file "worktime-test-" t)))
+      (unwind-protect
+          (progn
+            (worktime-start (worktime-test--time "08:00"))
+            (worktime-stop (worktime-test--time "16:30"))
+            (should-not (directory-files default-directory nil
+                                         directory-files-no-dot-files-regexp)))
+        (delete-directory default-directory t)))))
 
 ;;; worktime-test.el ends here
